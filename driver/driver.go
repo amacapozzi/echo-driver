@@ -85,8 +85,6 @@ func GetProcHandle(hDriver windows.Handle, pid int) (windows.Handle, error) {
 		return 0, fmt.Errorf("devicecontrol failed %v %v", err, windows.GetLastError())
 	}
 
-	fmt.Println(param)
-
 	return param.Handle, nil
 }
 
@@ -129,6 +127,19 @@ func ReadAllMemory(hDriver windows.Handle, targetProcess windows.Handle) (string
 	kernel32 := windows.NewLazyDLL("kernel32.dll")
 	virtualQueryEx := kernel32.NewProc("VirtualQueryEx")
 
+	options := utils.StringOptions{
+		MinChars:            4,
+		PrintNotInteresting: true,
+		PrintJSON:           false,
+		PrintFilepath:       true,
+		PrintFilename:       true,
+		PrintStringType:     true,
+		PrintSpan:           true,
+		EscapeNewLines:      true,
+	}
+
+	parser := utils.NewStringParser(options)
+
 	for {
 		ret, _, _ := virtualQueryEx.Call(uintptr(targetProcess), address, uintptr(unsafe.Pointer(&mbi)), unsafe.Sizeof(mbi))
 		if ret == 0 {
@@ -137,13 +148,17 @@ func ReadAllMemory(hDriver windows.Handle, targetProcess windows.Handle) (string
 
 		if mbi.State == windows.MEM_COMMIT && (mbi.Protect&windows.PAGE_READWRITE != 0 || mbi.Protect&windows.PAGE_READONLY != 0) {
 			data, err := ReadMemoryRaw(hDriver, targetProcess, mbi.BaseAddress, mbi.RegionSize)
-			if err == nil {
-				parsedStrings := utils.ParseMemory(data)
-
-				for _, v := range parsedStrings {
-					result.WriteString(v + "\n")
-				}
+			if err != nil {
+				fmt.Printf("Error reading memory at 0x%x: %v\n", mbi.BaseAddress, err)
+				continue
 			}
+
+			if len(data) == 0 {
+				fmt.Printf("Empty buffer at 0x%x\n", mbi.BaseAddress)
+				continue
+			}
+
+			parser.ParseBlock(data, "shortName", "longName", mbi.BaseAddress)
 		}
 
 		address = mbi.BaseAddress + mbi.RegionSize
@@ -151,7 +166,6 @@ func ReadAllMemory(hDriver windows.Handle, targetProcess windows.Handle) (string
 
 	return result.String(), nil
 }
-
 func WriteDriver(bytes []byte) error {
 	if err := os.WriteFile(DRIVER_FULL_PATH, bytes, 0644); err != nil {
 		return err

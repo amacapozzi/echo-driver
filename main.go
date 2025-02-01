@@ -58,13 +58,7 @@ func main() {
 		return
 	}
 
-	content, err := driver.ReadAllMemory(*hDriver, handle)
+	s, _ := driver.ReadAllMemory(*hDriver, handle)
 
-	if err != nil {
-		utils.ParseError(err)
-		return
-	}
-
-	fmt.Println(content)
-
+	fmt.Println(s)
 }
