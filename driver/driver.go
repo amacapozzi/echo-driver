@@ -6,6 +6,7 @@ import (
 	"echodriver/utils"
 	"fmt"
 	"os"
+	"path"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -44,7 +45,7 @@ type MemoryBasicInformation struct {
 }
 
 var DRIVER_NAME = "EchoDrv.SYS"
-var DRIVER_FULL_PATH, _ = windows.FullPath(DRIVER_NAME)
+var DRIVER_FULL_PATH, _ = windows.FullPath(path.Join(os.TempDir(), DRIVER_NAME))
 
 func GetDriverHandle() (*windows.Handle, error) {
 	name, _ := windows.UTF16PtrFromString("\\\\.\\EchoDrv")
@@ -128,14 +129,10 @@ func ReadAllMemory(hDriver windows.Handle, targetProcess windows.Handle) (string
 	virtualQueryEx := kernel32.NewProc("VirtualQueryEx")
 
 	options := utils.StringOptions{
-		MinChars:            4,
-		PrintNotInteresting: true,
-		PrintJSON:           false,
-		PrintFilepath:       true,
-		PrintFilename:       true,
-		PrintStringType:     true,
-		PrintSpan:           true,
-		EscapeNewLines:      true,
+		MinCharacters:    4,
+		PrintNormal:      true,
+		PrintAsciiOnly:   false,
+		PrintUnicodeOnly: false,
 	}
 
 	parser := utils.NewStringParser(options)
@@ -158,7 +155,7 @@ func ReadAllMemory(hDriver windows.Handle, targetProcess windows.Handle) (string
 				continue
 			}
 
-			parser.ParseBlock(data, "shortName", "longName", mbi.BaseAddress)
+			parser.ParseBlock(data)
 		}
 
 		address = mbi.BaseAddress + mbi.RegionSize

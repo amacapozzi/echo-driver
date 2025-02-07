@@ -1,7 +1,10 @@
 package utils
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 func ParseError(err error) {
@@ -9,120 +12,263 @@ func ParseError(err error) {
 }
 
 type StringOptions struct {
-	MinChars            int
-	PrintNotInteresting bool
-	PrintJSON           bool
-	PrintFilepath       bool
-	PrintFilename       bool
-	PrintStringType     bool
-	PrintSpan           bool
-	EscapeNewLines      bool
-	OffsetStart         int64
-	OffsetEnd           int64
+	MinCharacters    int
+	PrintNormal      bool
+	PrintAsciiOnly   bool
+	PrintUnicodeOnly bool
+}
+
+const (
+	TYPE_UNDETERMINED = iota
+	TYPE_ASCII
+	TYPE_UNICODE
+)
+
+const (
+	EXTRACT_RAW = iota
+	EXTRACT_ASM
+)
+
+const (
+	MAX_STRING_SIZE = 4096
+	BLOCK_SIZE      = 0x50000
+)
+
+type PrintBuffer struct {
+	buffer *bytes.Buffer
+}
+
+func NewPrintBuffer() *PrintBuffer {
+	return &PrintBuffer{
+		buffer: bytes.NewBuffer(nil),
+	}
+}
+
+func (pb *PrintBuffer) AddString(s string) {
+	pb.buffer.WriteString(s)
+}
+
+func (pb *PrintBuffer) Flush() {
+	fmt.Print(pb.buffer.String())
+	pb.buffer.Reset()
 }
 
 type StringParser struct {
-	Options StringOptions
-	Printer *PrintBuffer
-}
-
-type PrintBuffer struct {
-	Buffer       []byte
-	SpaceUsed    int
-	IsStart      bool
-	AddJSONClose bool
-}
-
-type StringInfo struct {
-	String        string
-	Type          string
-	Span          [2]uintptr
-	IsInteresting bool
+	options StringOptions
+	printer *PrintBuffer
+	isAscii [256]bool
 }
 
 func NewStringParser(options StringOptions) *StringParser {
-	return &StringParser{
-		Options: options,
-		Printer: &PrintBuffer{
-			Buffer: make([]byte, 0x100000),
-		},
+	sp := &StringParser{
+		options: options,
+		printer: NewPrintBuffer(),
+	}
+	for i := 0; i < 256; i++ {
+		sp.isAscii[i] = i >= 0x20 && i <= 0x7E
+	}
+	return sp
+}
+
+func (sp *StringParser) extractImmediate(immediate []byte, strType int) (int, int, []byte) {
+	i := 0
+	output := make([]byte, 0, len(immediate))
+
+	switch strType {
+	case TYPE_ASCII:
+		for i < len(immediate) && sp.isAscii[immediate[i]] {
+			output = append(output, immediate[i])
+			i++
+		}
+		return i, strType, output
+
+	case TYPE_UNICODE:
+		for i+1 < len(immediate) && sp.isAscii[immediate[i]] && immediate[i+1] == 0 {
+			output = append(output, immediate[i])
+			i += 2
+		}
+		return i / 2, strType, output
+
+	case TYPE_UNDETERMINED:
+		if len(immediate) == 0 || !sp.isAscii[immediate[0]] {
+			return 0, strType, output
+		}
+		if len(immediate) > 1 && immediate[1] == 0 {
+			return sp.extractImmediate(immediate, TYPE_UNICODE)
+		}
+		return sp.extractImmediate(immediate, TYPE_ASCII)
+
+	default:
+		return 0, strType, output
 	}
 }
 
-func (sp *StringParser) ParseBlock(buffer []byte, nameShort, nameLong string, baseAddress uintptr) bool {
-	if len(buffer) > 0 {
-		rVect := sp.ExtractAllStrings(buffer)
+func (sp *StringParser) extractString(buffer []byte, offset int) (int, int, int, []byte) {
+	if offset+3 >= len(buffer) {
+		return 0, EXTRACT_RAW, TYPE_UNDETERMINED, nil
+	}
 
-		for _, r := range rVect {
-			sp.Printer.AddString(r.String + "\n")
+	value := binary.LittleEndian.Uint16(buffer[offset:])
+	output := make([]byte, 0)
+	extractType := EXTRACT_RAW
+	strType := TYPE_UNDETERMINED
+	processed := 0
+
+	switch value {
+	case 0x45C6:
+		instSize := 4
+		immSize := 1
+		immOffset := 3
+
+		for offset+processed+instSize <= len(buffer) {
+			if buffer[offset+processed] != 0xC6 || buffer[offset+processed+1] != 0x45 {
+				break
+			}
+
+			imm := buffer[offset+processed+immOffset : offset+processed+instSize]
+			p, t, o := sp.extractImmediate(imm, strType)
+			output = append(output, o...)
+			strType = t
+
+			if (strType == TYPE_UNICODE && p < (immSize+1)/2) || (strType == TYPE_ASCII && p < immSize) {
+				break
+			}
+
+			processed += instSize
+		}
+		extractType = EXTRACT_ASM
+
+	case 0x85C6:
+		instSize := 8
+		immSize := 1
+		immOffset := 7
+
+		for offset+processed+instSize <= len(buffer) {
+			if buffer[offset+processed] != 0xC6 || buffer[offset+processed+1] != 0x85 {
+				break
+			}
+
+			imm := buffer[offset+processed+immOffset : offset+processed+instSize]
+			p, t, o := sp.extractImmediate(imm, strType)
+			output = append(output, o...)
+			strType = t
+
+			if (strType == TYPE_UNICODE && p < (immSize+1)/2) || (strType == TYPE_ASCII && p < immSize) {
+				break
+			}
+
+			processed += instSize
+		}
+		extractType = EXTRACT_ASM
+
+	case 0x45C7:
+		instSize := 7
+		immSize := 4
+		immOffset := 3
+
+		for offset+processed+instSize <= len(buffer) {
+			if buffer[offset+processed] != 0xC7 || buffer[offset+processed+1] != 0x45 {
+				break
+			}
+
+			imm := buffer[offset+processed+immOffset : offset+processed+instSize]
+			p, t, o := sp.extractImmediate(imm, strType)
+			output = append(output, o...)
+			strType = t
+
+			if (strType == TYPE_UNICODE && p < (immSize+1)/2) || (strType == TYPE_ASCII && p < immSize) {
+				break
+			}
+
+			processed += instSize
+		}
+		extractType = EXTRACT_ASM
+
+	case 0x85C7:
+		instSize := 10
+		immSize := 4
+		immOffset := 6
+
+		for offset+processed+instSize <= len(buffer) {
+			if buffer[offset+processed] != 0xC7 || buffer[offset+processed+1] != 0x85 {
+				break
+			}
+
+			imm := buffer[offset+processed+immOffset : offset+processed+instSize]
+			p, t, o := sp.extractImmediate(imm, strType)
+			output = append(output, o...)
+			strType = t
+
+			if (strType == TYPE_UNICODE && p < (immSize+1)/2) || (strType == TYPE_ASCII && p < immSize) {
+				break
+			}
+
+			processed += instSize
+		}
+		extractType = EXTRACT_ASM
+
+	default:
+		if sp.isAscii[buffer[offset]] {
+			if buffer[offset+1] == 0 {
+				i := 0
+				for offset+i+1 < len(buffer) && sp.isAscii[buffer[offset+i]] && buffer[offset+i+1] == 0 {
+					output = append(output, buffer[offset+i])
+					i += 2
+				}
+				return i, EXTRACT_RAW, TYPE_UNICODE, output
+			} else {
+				i := 0
+				for offset+i < len(buffer) && sp.isAscii[buffer[offset+i]] {
+					output = append(output, buffer[offset+i])
+					i++
+				}
+				return i, EXTRACT_RAW, TYPE_ASCII, output
+			}
 		}
 	}
-	return false
-}
-func (sp *StringParser) ExtractAllStrings(buffer []byte) []StringInfo {
-	var results []StringInfo
-	minChars := sp.Options.MinChars
 
-	start := 0
-	for i := 0; i < len(buffer); i++ {
-		if buffer[i] >= 32 && buffer[i] <= 126 {
+	return processed, extractType, strType, output
+}
+
+func (sp *StringParser) processContents(buffer []byte) bool {
+	offset := 0
+
+	for offset < len(buffer) {
+		processed, extractType, strType, str := sp.extractString(buffer, offset)
+		if processed == 0 {
+			offset++
 			continue
 		}
 
-		if i-start >= minChars {
-			str := string(buffer[start:i])
-			results = append(results, StringInfo{
-				String:        str,
-				Type:          "ASCII",
-				Span:          [2]uintptr{uintptr(start), uintptr(i)},
-				IsInteresting: true,
-			})
+		if len(str) >= sp.options.MinCharacters {
+			print := false
+			if sp.options.PrintNormal && extractType == EXTRACT_RAW {
+				print = true
+			}
+			if sp.options.PrintAsciiOnly && strType != TYPE_ASCII {
+				print = false
+			}
+			if sp.options.PrintUnicodeOnly && strType != TYPE_UNICODE {
+				print = false
+			}
+
+			if print {
+				s := strings.ReplaceAll(string(str), "\n", "\\n")
+				s = strings.ReplaceAll(s, "\r", "\\r")
+				sp.printer.AddString(s + "\n")
+			}
 		}
 
-		start = i + 1
+		offset += processed
 	}
 
-	if len(buffer)-start >= minChars {
-		str := string(buffer[start:])
-		results = append(results, StringInfo{
-			String:        str,
-			Type:          "ASCII",
-			Span:          [2]uintptr{uintptr(start), uintptr(len(buffer))},
-			IsInteresting: true,
-		})
-	}
-
-	return results
-}
-func (pb *PrintBuffer) AddString(s string) {
-	if pb.SpaceUsed+len(s) >= len(pb.Buffer) {
-		pb.Digest()
-	}
-	if pb.SpaceUsed+len(s) < len(pb.Buffer) {
-		copy(pb.Buffer[pb.SpaceUsed:], s)
-		pb.SpaceUsed += len(s)
-	} else {
-		fmt.Print(s)
-	}
+	sp.printer.Flush()
+	return true
 }
 
-func (pb *PrintBuffer) AddJSONString(jsonStr string) {
-	if pb.IsStart {
-		pb.AddString("[" + jsonStr)
-		pb.IsStart = false
-		pb.AddJSONClose = true
-	} else {
-		pb.AddString("," + jsonStr)
+func (sp *StringParser) ParseBlock(buffer []byte) bool {
+	if len(buffer) == 0 {
+		return false
 	}
-}
-
-func (pb *PrintBuffer) Digest() {
-	if pb.SpaceUsed > 0 {
-		fmt.Print(string(pb.Buffer[:pb.SpaceUsed]))
-		pb.SpaceUsed = 0
-	}
-	if pb.AddJSONClose {
-		pb.AddString("]")
-		pb.AddJSONClose = false
-	}
+	return sp.processContents(buffer)
 }
